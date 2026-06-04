@@ -1,9 +1,17 @@
 import requests
 
-GEOSERVER  = "http://localhost:8080/geoserver"
-WORKSPACE  = "prithvi"
-AUTH       = ('admin', 'geoserver')
+GEOSERVER   = "http://172.17.32.1:8080/geoserver"
+WORKSPACE   = "prithvi"
+AUTH        = ('admin', 'geoserver')
 HEADERS_XML = {"Content-Type": "application/xml"}
+
+# WSL to Windows path converter
+def to_windows_path(wsl_path):
+    if wsl_path.startswith("/mnt/c/"):
+        return "C:/" + wsl_path[7:]
+    elif wsl_path.startswith("/mnt/d/"):
+        return "D:/" + wsl_path[7:]
+    return wsl_path
 
 def ensure_workspace():
     r = requests.get(
@@ -21,6 +29,9 @@ def ensure_workspace():
 def publish_cog(layer_name, cog_path):
     ensure_workspace()
 
+    # ← Convert WSL path to Windows path for GeoServer
+    windows_path = to_windows_path(cog_path)
+
     # Create store
     store_xml = f"""
     <coverageStore>
@@ -28,7 +39,7 @@ def publish_cog(layer_name, cog_path):
         <type>GeoTIFF</type>
         <enabled>true</enabled>
         <workspace>{WORKSPACE}</workspace>
-        <url>file:{cog_path}</url>
+        <url>file:{windows_path}</url>
     </coverageStore>
     """
     requests.post(
