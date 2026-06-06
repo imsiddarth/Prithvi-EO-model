@@ -32,7 +32,7 @@ def save_layer(layer_name, cog_path, wms_url, bbox, epsg):
 def get_all_layers():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, layer_name, wms_url, created_at FROM layers ORDER BY created_at DESC"
+        "SELECT id, layer_name, wms_url, bbox, epsg, created_at, cog_path FROM layers ORDER BY created_at DESC"
     ).fetchall()
     conn.close()
     return rows

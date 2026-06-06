@@ -236,43 +236,78 @@ def _stack_bands(band_paths, output_path, norm_factor=10000.0):
 
 # ── Segmentation ──────────────────────────────────────────
 
-def run_segmentation(merged_tif, model, output_path, chunk_size=1024):
+def run_segmentation(merged_tif, model, output_path, chunk_size=1024, progress_cb=None):
     with rasterio.open(merged_tif) as src:
-        img     = src.read().astype(np.float32) / 10000.0
         profile = src.profile.copy()
         H, W    = src.height, src.width
 
-    full_mask = np.zeros((H, W), dtype=np.uint8)
-    model.eval()
-
-    # Count total patches for progress
-    total_patches = ((H - PATCH_SIZE) // PATCH_SIZE) * ((W - PATCH_SIZE) // PATCH_SIZE)
-    done = 0
-
-    print(f"Image size: {H}x{W}")
-    print(f"Total patches: {total_patches}")
-
-    with torch.no_grad():
+        # Count total patches first for progress tracking
+        total_patches = 0
         for row in range(0, H - PATCH_SIZE, PATCH_SIZE):
             for col in range(0, W - PATCH_SIZE, PATCH_SIZE):
-                patch  = img[:, row:row+PATCH_SIZE, col:col+PATCH_SIZE]
-                tensor = torch.tensor(patch).unsqueeze(0).cuda()
-                out    = model(tensor)
-                if hasattr(out, 'output'): out = out.output
-                pred   = out.argmax(1).squeeze(0).cpu().numpy().astype(np.uint8)
-                full_mask[row:row+PATCH_SIZE, col:col+PATCH_SIZE] = pred
+                total_patches += 1
 
-                # Free GPU memory every patch
-                del tensor, out
-                torch.cuda.empty_cache()
+        print(f"Image size: {H}x{W}")
+        print(f"Total patches: {total_patches}")
 
-                done += 1
-                if done % 100 == 0:
-                    print(f"Progress: {done}/{total_patches} patches ({100*done//total_patches}%)")
+        profile.update(count=1, dtype='uint8')
+        
+        # Open output file for writing chunk-by-chunk
+        with rasterio.open(output_path, 'w', **profile) as dst:
+            stripe_rows = 1024
+            done = 0
+            model.eval()
 
-    profile.update(count=1, dtype='uint8')
-    with rasterio.open(output_path, 'w', **profile) as dst:
-        dst.write(full_mask, 1)
+            with torch.no_grad():
+                for s_row in range(0, H - PATCH_SIZE, stripe_rows):
+                    # We process vertical patches starting from s_row up to s_row + stripe_rows
+                    patch_rows = []
+                    for r in range(s_row, min(s_row + stripe_rows, H - PATCH_SIZE), PATCH_SIZE):
+                        patch_rows.append(r)
+                    
+                    if not patch_rows:
+                        continue
+
+                    # If this is the last stripe, we read all remaining rows to avoid gaps at the bottom
+                    is_last_stripe = (s_row + stripe_rows >= H - PATCH_SIZE)
+                    if is_last_stripe:
+                        h_read = H - s_row
+                    else:
+                        h_read = (patch_rows[-1] + PATCH_SIZE) - s_row
+
+                    # Read window from source (only 6 bands for this window)
+                    window = rasterio.windows.Window(0, s_row, W, h_read)
+                    img_stripe = src.read(window=window).astype(np.float32) / 10000.0
+
+                    # Create empty mask for this stripe
+                    stripe_mask = np.zeros((h_read, W), dtype=np.uint8)
+
+                    # Predict patches within the stripe
+                    for r in patch_rows:
+                        r_rel = r - s_row
+                        for col in range(0, W - PATCH_SIZE, PATCH_SIZE):
+                            patch  = img_stripe[:, r_rel:r_rel+PATCH_SIZE, col:col+PATCH_SIZE]
+                            tensor = torch.tensor(patch).unsqueeze(0).cuda()
+                            out    = model(tensor)
+                            if hasattr(out, 'output'): out = out.output
+                            pred   = out.argmax(1).squeeze(0).cpu().numpy().astype(np.uint8)
+                            stripe_mask[r_rel:r_rel+PATCH_SIZE, col:col+PATCH_SIZE] = pred
+
+                            # Free GPU memory
+                            del tensor, out
+                            torch.cuda.empty_cache()
+
+                            done += 1
+                            if progress_cb:
+                                try:
+                                    progress_cb(done, total_patches)
+                                except:
+                                    pass
+                            if done % 100 == 0:
+                                print(f"Progress: {done}/{total_patches} patches ({100*done//total_patches}%)")
+
+                    # Write this stripe's mask directly to output TIFF
+                    dst.write(stripe_mask, 1, window=window)
 
     return output_path
 
